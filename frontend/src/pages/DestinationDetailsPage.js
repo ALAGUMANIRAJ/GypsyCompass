@@ -15,6 +15,18 @@ const DESTINATION_IMAGES = {
     'coorg': 'https://images.unsplash.com/photo-1591017403286-fd8493524e1e?w=1200&q=85',
     'rishikesh': 'https://images.unsplash.com/photo-1590073242678-70ee3fc28f8e?w=1200&q=85',
     'meghalaya': 'https://images.unsplash.com/photo-1519655377407-b66b59b93e45?w=1200&q=85',
+    'ooty': 'https://images.unsplash.com/photo-1582131503261-fca1d1c0589f?w=1200&q=85',
+    'kodaikanal': 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=1200&q=85',
+    'yercaud': 'https://images.unsplash.com/photo-1544735716-392fe2489ffa?w=1200&q=85',
+    'yelagiri': 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=1200&q=85',
+    'valparai': 'https://images.unsplash.com/photo-1587974928442-77dc3e0dba72?w=1200&q=85',
+    'coonoor': 'https://images.unsplash.com/photo-1582131503261-fca1d1c0589f?w=1200&q=85',
+    'chikmagalur': 'https://images.unsplash.com/photo-1591017403286-fd8493524e1e?w=1200&q=85',
+    'sakleshpur': 'https://images.unsplash.com/photo-1591017403286-fd8493524e1e?w=1200&q=85',
+    'munnar': 'https://images.unsplash.com/photo-1587974928442-77dc3e0dba72?w=1200&q=85',
+    'wayanad': 'https://images.unsplash.com/photo-1602216056096-3b40cc0c9944?w=1200&q=85',
+    'pondicherry': 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=1200&q=85',
+    'varanasi': 'https://images.unsplash.com/photo-1548013146-72479768bada?w=1200&q=85',
     'mountain': 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=1200&q=85',
     'beach': 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=1200&q=85',
     'desert': 'https://images.unsplash.com/photo-1518684079-3c830dcef090?w=1200&q=85',
@@ -112,8 +124,16 @@ const DestinationDetailsPage = ({ destination, userPrefs }) => {
                     </button>
                 </div>
                 <div className="details-hero-content" style={{ maxWidth: '1200px', left: '50%', transform: 'translateX(-50%)' }}>
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', background: 'rgba(255,255,255,0.2)', backdropFilter: 'blur(8px)', padding: '4px 14px', borderRadius: '999px', fontSize: '0.8rem', color: '#fff', marginBottom: '0.75rem' }}>
+                        <span>✨</span> Real-time AI Travel Intelligence
+                    </div>
                     <h1>{details.name || destinationName}</h1>
                     <p>📍 {details.full_location}</p>
+                    {details.live_weather && (
+                        <div style={{ marginTop: '0.6rem', display: 'inline-flex', alignItems: 'center', gap: '6px', background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(8px)', padding: '4px 14px', borderRadius: '999px', fontSize: '0.85rem', color: '#e0f2fe' }}>
+                            <span>🌤️</span> Current Conditions: {details.live_weather}
+                        </div>
+                    )}
                 </div>
             </div>
 
@@ -126,7 +146,8 @@ const DestinationDetailsPage = ({ destination, userPrefs }) => {
                             { icon: '🛣️', text: details.distance_from_start },
                             { icon: '☀️', text: `Best: ${details.best_season}` },
                             { icon: '🚌', text: details.local_transport },
-                        ].map((chip, i) => (
+                            details.live_weather ? { icon: '🌤️', text: `Live Weather: ${details.live_weather}` } : null,
+                        ].filter(Boolean).map((chip, i) => (
                             <span key={i} className="chip">
                                 {chip.icon} {chip.text}
                             </span>

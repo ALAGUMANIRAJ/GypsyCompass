@@ -20,6 +20,12 @@ const DESTINATION_IMAGES = {
     'spiti': 'https://images.unsplash.com/photo-1609587312208-cea54be969e7?w=600&q=80',
     'nainital': 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=600&q=80',
     'kodaikanal': 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=600&q=80',
+    'yercaud': 'https://images.unsplash.com/photo-1544735716-392fe2489ffa?w=600&q=80',
+    'yelagiri': 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=600&q=80',
+    'valparai': 'https://images.unsplash.com/photo-1587974928442-77dc3e0dba72?w=600&q=80',
+    'coonoor': 'https://images.unsplash.com/photo-1582131503261-fca1d1c0589f?w=600&q=80',
+    'chikmagalur': 'https://images.unsplash.com/photo-1591017403286-fd8493524e1e?w=600&q=80',
+    'sakleshpur': 'https://images.unsplash.com/photo-1591017403286-fd8493524e1e?w=600&q=80',
     // Beaches & Water
     'goa': 'https://images.unsplash.com/photo-1512343879784-a960bf40e7f2?w=600&q=80',
     'andaman': 'https://images.unsplash.com/photo-1559628233-100c798642d4?w=600&q=80',
@@ -187,6 +193,31 @@ const DestinationCard = ({ dest, userPrefs, onSelect }) => {
                         ⏱️ {dest.travel_time}
                     </span>
                 </div>
+                {(dest.transport_cost || dest.stay_cost || dest.food_cost) && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '5px', marginTop: '10px', padding: '9px 12px', background: '#f8fafc', borderRadius: '10px', border: '1px solid #e2e8f0', fontSize: '0.78rem' }}>
+                        {dest.transport_cost && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#1e293b' }}>
+                                <span style={{ flexShrink: 0 }}>🚀</span>
+                                <span style={{ fontWeight: 600 }}>Travel:</span>
+                                <span style={{ color: '#475569' }}>{dest.transport_cost}</span>
+                            </div>
+                        )}
+                        {dest.stay_cost && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#1e293b' }}>
+                                <span style={{ flexShrink: 0 }}>🏨</span>
+                                <span style={{ fontWeight: 600 }}>Stay:</span>
+                                <span style={{ color: '#475569' }}>{dest.stay_cost}</span>
+                            </div>
+                        )}
+                        {dest.food_cost && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#1e293b' }}>
+                                <span style={{ flexShrink: 0 }}>🍽️</span>
+                                <span style={{ fontWeight: 600 }}>Food:</span>
+                                <span style={{ color: '#475569' }}>{dest.food_cost}</span>
+                            </div>
+                        )}
+                    </div>
+                )}
                 <div className="destination-card-footer">
                     <div className="destination-cost">
                         <div className="cost-label">Estimated Total</div>
@@ -237,8 +268,8 @@ const ResultsPage = ({ recommendations, userPrefs, setSelectedDestination }) => 
             {/* Header */}
             <div className="results-header">
                 <div className="container">
-                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '6px 16px', background: 'rgba(255,255,255,0.15)', borderRadius: '999px', fontSize: '0.82rem', color: 'rgba(255,255,255,0.9)', marginBottom: '1rem', fontFamily: 'Inter, sans-serif' }}>
-                        <span>🎯</span> Personalized for {userPrefs?.name || 'You'}
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '6px 16px', background: 'rgba(255,255,255,0.15)', borderRadius: '999px', fontSize: '0.82rem', color: 'rgba(255,255,255,0.95)', marginBottom: '1rem', fontFamily: 'Inter, sans-serif' }}>
+                        <span>⚡</span> Real-time AI Travel Intelligence • Personalized for {userPrefs?.name || 'You'}
                     </div>
                     <h1>Your Perfect Destinations Are Here! 🌍</h1>
                     <p>

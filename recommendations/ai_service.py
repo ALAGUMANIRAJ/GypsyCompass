@@ -16,6 +16,8 @@ import re
 import random
 import traceback
 import sys
+import time
+import requests
 from dotenv import load_dotenv
 from google.genai import types
 
@@ -28,6 +30,63 @@ except:
 
 # ── Load .env on every import so key changes reflect instantly ──
 load_dotenv(override=True)
+
+# ── Active Gemini models in order of priority ──
+MODELS_PRIORITY = [
+    'gemini-3.8-flash',
+    'gemini-3.5-flash-lite',
+    'gemini-3.7-flash',
+    'gemini-flash-latest',
+]
+
+
+def fetch_live_destination_data(destination_name: str) -> dict:
+    """
+    Fetches real-time internet data for a destination from open web sources:
+    1. Real-time live weather (temperature & sky conditions) via Open-Meteo
+    2. Real-time Wikipedia summary and coordinates
+    """
+    info = {"live_weather": None, "wiki_summary": None, "coords": None}
+    headers = {"User-Agent": "GypsyCompass/2.0 (travel-planner)"}
+    
+    clean_name = destination_name.split(',')[0].strip().replace(' ', '_')
+    for q in [clean_name, f"{clean_name},_India", destination_name.strip().replace(' ', '_')]:
+        try:
+            wiki_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{q}"
+            r = requests.get(wiki_url, headers=headers, timeout=2.5)
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("type") != "disambiguation":
+                    if not info["wiki_summary"]:
+                        info["wiki_summary"] = data.get("extract")
+                    if "coordinates" in data:
+                        info["coords"] = (data["coordinates"]["lat"], data["coordinates"]["lon"])
+                        break
+        except Exception:
+            pass
+
+    if info["coords"]:
+        lat, lon = info["coords"]
+        try:
+            weather_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat:.2f}&longitude={lon:.2f}&current=temperature_2m,weather_code"
+            wr = requests.get(weather_url, timeout=2.5)
+            if wr.status_code == 200:
+                wdata = wr.json().get("current", {})
+                temp = wdata.get("temperature_2m")
+                code = wdata.get("weather_code", 0)
+                weather_map = {
+                    0: "Clear sky ☀️", 1: "Mainly clear 🌤️", 2: "Partly cloudy ⛅", 3: "Overcast ☁️",
+                    45: "Foggy 🌫️", 48: "Depositing rime fog 🌫️",
+                    51: "Light drizzle 🌦️", 61: "Slight rain 🌧️", 63: "Moderate rain 🌧️",
+                    71: "Slight snow 🌨️", 80: "Rain showers 🌦️", 95: "Thunderstorm ⛈️"
+                }
+                desc = weather_map.get(code, "Pleasant weather ⛅")
+                if temp is not None:
+                    info["live_weather"] = f"{temp}°C, {desc}"
+        except Exception:
+            pass
+
+    return info
 
 
 def _read_api_key():
@@ -766,22 +825,63 @@ class GeminiAIService:
         print("[AI]    Get a free key at: https://aistudio.google.com/app/apikey")
         print("[AI]    Then add to .env: GEMINI_API_KEY=AIzaSy...")
 
-    def _call_gemini(self, prompt: str) -> str | None:
-        """Call the Gemini model and return raw text, or None on failure."""
-        try:
-            from google import genai
-            response = self.client.models.generate_content(
-                model='gemini-2.0-flash',
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    tools=[types.Tool(google_search=types.GoogleSearch())]
-                )
-            )
-            return response.text
-        except Exception as e:
-            print(f"[AI] Gemini call error: {e}")
-            traceback.print_exc()
+    def _call_gemini(self, prompt: str, use_json: bool = True, try_search: bool = True) -> str | None:
+        """
+        Calls the Gemini model with multi-model fallback across:
+        ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-flash-latest', 'gemini-3.5-flash-lite'].
+        Gracefully handles Google search grounding quota limits (429) by falling back to direct generation.
+        """
+        if not self.client:
             return None
+
+        # Build attempt configurations
+        configs = []
+        enable_grounding = os.environ.get('GEMINI_ENABLE_SEARCH_GROUNDING', 'false').lower() in ('true', '1', 'yes')
+        if try_search and enable_grounding:
+            try:
+                configs.append(("with_search", types.GenerateContentConfig(
+                    tools=[types.Tool(google_search=types.GoogleSearch())],
+                    temperature=0.7
+                )))
+            except Exception:
+                pass
+
+        # Direct generation config (JSON response when requested)
+        if use_json:
+            configs.append(("direct_generation", types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.7
+            )))
+        else:
+            configs.append(("direct_generation", types.GenerateContentConfig(
+                temperature=0.7
+            )))
+
+        for config_mode, config in configs:
+            for model_name in MODELS_PRIORITY:
+                try:
+                    response = self.client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=config
+                    )
+                    if response and response.text and response.text.strip():
+                        print(f"[AI] ✅ Gemini {model_name} ({config_mode}) succeeded")
+                        return response.text.strip()
+                except Exception as e:
+                    err_str = str(e)
+                    print(f"[AI] Model {model_name} ({config_mode}) warning: {err_str[:120]}")
+                    if "RESOURCE_EXHAUSTED" in err_str or "429" in err_str:
+                        if config_mode == "with_search":
+                            # Search grounding quota exhausted on this key, skip to direct generation
+                            print("[AI] Search grounding quota not available, falling back to direct generation")
+                            break
+                    if "503" in err_str or "UNAVAILABLE" in err_str:
+                        time.sleep(0.5)
+                        continue
+                    if "404" in err_str:
+                        continue
+        return None
 
     def _clean_json(self, text: str):
         """Extract JSON object or array from Gemini response text."""
@@ -827,7 +927,7 @@ class GeminiAIService:
         return self._get_fallback_recommendations(user_prefs)
 
     def _get_ai_recommendations(self, prefs: dict) -> dict | None:
-        """Build the prompt and call Gemini for recommendations."""
+        """Build the prompt and call Gemini for real-time recommendations."""
         styles = prefs.get('destination_styles', [])
         styles_str = ', '.join(styles) if styles else 'mixed destinations (beaches, mountains, nature, culture)'
         currency = prefs.get('currency', 'INR')
@@ -851,63 +951,44 @@ class GeminiAIService:
             cost_instruction = f"""TRAVEL MODE: TRAVEL AGENCY PACKAGE
 The user wants a TRAVEL AGENCY PACKAGE. The estimated_total_cost should be the TOTAL PACKAGE COST 
 that a travel agency would charge, including transport, accommodation, food, sightseeing, and guide.
-Search for ACTUAL travel agency package prices from popular agencies like MakeMyTrip, Yatra, IRCTC tourism,
-state tourism packages for {num_days} days trips from {from_loc}.
-This is THE ONLY mode where you should quote package prices."""
+Calculate realistic agency package prices for {num_days} days trips from {from_loc}."""
         elif medium == 'bus':
-            cost_instruction = f"""TRAVEL MODE: BUS (Individual Travel — NOT package tour)
-The user is traveling INDEPENDENTLY by bus. DO NOT show travel agency package prices.
-Calculate costs as an INDIVIDUAL BUDGET TRAVELER would spend:
-- Transport: Search for ACTUAL government bus (TNSTC, KSRTC, APSRTC, etc.) and private bus ticket prices from {from_loc}. 
-  Example: Chennai to Ooty by government bus = INR 400-600, private sleeper = INR 700-1000.
-- Accommodation: Budget lodges, dormitories, OYO rooms (INR 400-1200/night for budget).
-- Food: Local restaurants, dhabas, street food (INR 150-300/day for budget meals).
-- Sightseeing: Entry fees to tourist spots, local auto fares.
-Keep costs REALISTIC for a budget backpacker/individual traveler using public bus transport."""
+            cost_instruction = f"""TRAVEL MODE: BUS (Individual Travel)
+Calculate costs as an INDIVIDUAL BUDGET TRAVELER:
+- Transport: Actual bus fare from {from_loc} (State RTC / private sleeper bus).
+- Accommodation: Budget lodges, hostels, OYO rooms.
+- Food: Local restaurants, dhabas, street food.
+- Sightseeing: Entry fees, local auto fares."""
         elif medium == 'train':
-            cost_instruction = f"""TRAVEL MODE: TRAIN (Individual Travel — NOT package tour)
-The user is traveling INDEPENDENTLY by train. DO NOT show travel agency package prices.
-Calculate costs as an INDIVIDUAL TRAVELER would spend:
-- Transport: Search for ACTUAL Indian Railways ticket prices from {from_loc}.
-  Use Sleeper class / 3AC / 2AC prices based on budget. Example: Chennai to Coimbatore sleeper = INR 200-350, 3AC = INR 600-900.
-- Accommodation: Budget hotels, lodges, OYO rooms (INR 400-1500/night for budget).
-- Food: Local restaurants, station food, street food (INR 150-400/day).
-- Sightseeing: Entry fees, local transport (auto/bus) at destination.
-Keep costs REALISTIC for individual train travelers, NOT tour packages."""
+            cost_instruction = f"""TRAVEL MODE: TRAIN (Individual Travel)
+Calculate costs as an INDIVIDUAL TRAVELER:
+- Transport: Indian Railways fares from {from_loc} (Sleeper / 3AC / 2AC based on budget).
+- Accommodation: Budget hotels, hostels, lodges.
+- Food: Local restaurants and station meals.
+- Sightseeing: Local transit and entry fees."""
         elif medium == 'flight':
-            cost_instruction = f"""TRAVEL MODE: FLIGHT (Individual Travel — NOT package tour)
-The user is traveling INDEPENDENTLY by flight. DO NOT show travel agency package prices.
-Calculate costs as an INDIVIDUAL TRAVELER would spend:
-- Transport: Search for ACTUAL economy flight ticket prices from {from_loc} (IndiGo, SpiceJet, Air India, etc.).
-  Example: Chennai to Goa one-way = INR 2500-5000 depending on advance booking.
-- Accommodation: Budget to mid-range hotels (INR 800-2500/night).
-- Food: Local restaurants (INR 200-500/day).
-- Sightseeing: Entry fees, cab/auto at destination.
-Keep costs REALISTIC for an individual flight traveler, NOT tour packages."""
+            cost_instruction = f"""TRAVEL MODE: FLIGHT (Individual Travel)
+Calculate costs as an INDIVIDUAL TRAVELER:
+- Transport: Economy flight ticket fares from {from_loc}.
+- Accommodation: Mid-range to boutique hotels.
+- Food: Local restaurants and cafes.
+- Sightseeing: Entry fees and cabs."""
         else:
-            cost_instruction = f"""TRAVEL MODE: ANY (Individual Travel — NOT package tour)
-Calculate costs for the CHEAPEST available individual transport option (bus, train, or flight).
-DO NOT use travel agency/tour package prices. Show raw individual travel costs:
-- Transport: Actual bus/train/flight ticket costs from {from_loc}
-- Accommodation: Budget lodges/hotels  
-- Food: Local meals
-- Sightseeing: Entry fees, local transport"""
+            cost_instruction = f"""TRAVEL MODE: ANY (Cheapest convenient transport - bus, train, or flight)
+Calculate costs for the most practical transport option from {from_loc}, with realistic accommodation and meals."""
 
-        # Build food/accommodation instruction
         if food_accom == 'with':
-            food_instruction = """BUDGET INCLUDES: Transport + Accommodation + Food + Sightseeing = estimated_total_cost
-Include realistic accommodation (budget lodges/hotels) and food (local restaurants/dhabas) in the total."""
+            food_instruction = "BUDGET INCLUDES: Transport + Accommodation + Food + Sightseeing = estimated_total_cost."
         else:
-            food_instruction = """BUDGET EXCLUDES food & accommodation. estimated_total_cost = Transport + Sightseeing ONLY.
-The user arranges their own food and stay. Do NOT include hotel or food costs in estimated_total_cost."""
+            food_instruction = "BUDGET EXCLUDES food & accommodation. estimated_total_cost = Transport + Sightseeing ONLY."
 
-        prompt = f"""You are an expert AI travel analyst who recommends REAL, AFFORDABLE tourist destinations based on CURRENT 2025-2026 data.
+        prompt = f"""You are an expert AI travel analyst who provides REAL, ACCURATE, REAL-TIME 2026 tourist destination recommendations and actual travel costs based on current travel and market rates.
 
 TRAVELER PROFILE:
 - Name: {prefs.get('name', 'Traveler')}
 - Total Budget: {currency} {budget} (ENTIRE trip for {group_info})
 - Travel Scope: {travel_scope}
-- Type: {group_info}
+- Traveler Type: {group_info}
 - Duration: {num_days} days
 - Departing From: {from_loc}
 - Preferred Destination Styles: {styles_str}
@@ -917,63 +998,79 @@ TRAVELER PROFILE:
 {food_instruction}
 
 YOUR CORE MISSION:
-Use Google Search to find REAL, CURRENT tourist destinations and ACTUAL 2025-2026 travel costs.
-Think like a LOCAL TRAVELER — search for real bus/train/flight ticket prices, budget hotel rates, 
-and local food costs. NOT online tour package prices (unless user selected travel_agency).
+Provide REAL tourist destinations and ACTUAL 2026 travel costs.
+Calculate realistic market rates for transport ({medium}), accommodation (hostels, budget hotels, lodges), food (local restaurants, dhabas), and sightseeing.
+Think like a seasoned local traveler with exact current rates.
 
-IMPORTANT COST GUIDELINES:
-- Search the internet for REAL ticket prices (e.g., "{from_loc} to Ooty bus ticket price 2025")
-- Search for budget hotel/lodge prices at each destination
-- The total cost should be what a REAL person would actually spend, not inflated tour prices
-- For nearby destinations (< 300 km), transport cost should be realistically low (bus: INR 200-800, train: INR 150-600)
-- Prioritize destinations CLOSEST to {from_loc} first for low budgets
-- A solo traveler with INR 3000-7000 for 2-3 days CAN visit hill stations near their city by bus/train
+REQUIREMENTS:
+1. GROUP 1 — WITHIN BUDGET (mark "within_budget": true):
+   Provide 5-6 real destinations where estimated_total_cost <= {currency} {budget}.
+   Start with nearest destinations from {from_loc}, then expand outward.
+2. GROUP 2 — BEYOND BUDGET / ASPIRATIONAL (mark "within_budget": false):
+   Provide 2-3 aspirational destinations costing 20-50% more than budget ({currency} {int(float(budget)*1.2)} to {currency} {int(float(budget)*1.5)}).
+   Include "over_budget_note" explaining why the experience is worth the extra spend.
 
-YOUR TASK — provide two groups of recommendations:
+CRITICAL FIELD REQUIREMENTS FOR EVERY DESTINATION:
+- "transport_cost": Detailed round-trip transport cost from {from_loc} (e.g. "Round-trip Train (3AC/Sleeper): {currency} 1,200")
+- "stay_cost": Nightly accommodation cost (e.g. "Budget Hotel/Hostel: {currency} 900/night")
+- "food_cost": Daily food expense (e.g. "Local Food: {currency} 400/day")
+- "estimated_total_cost": Real calculated total for {num_days} days for {group_info}
+- "cost_per_day": Realistic daily cost
+- "distance_from_start": Approx distance in km from {from_loc}
+- "travel_time": Approx travel time by {medium} from {from_loc}
+- "best_for": Array of matching style tags
+- "highlight": Top 3 attractions
+- "famous_for": What makes this place unique
+- "image_keyword": 2-3 descriptive visual keywords
 
-GROUP 1 — WITHIN BUDGET (mark "within_budget": true):
-  Find 5-6 real tourist destinations that:
-  • STRICTLY match: {styles_str}
-  • estimated_total_cost ≤ {currency} {budget}
-  • Are reachable from {from_loc} by {medium}
-  • Cost calculated for {num_days} days for {group_info}
-  • Start with NEAREST affordable destinations, then expand outward
-  • For low budgets (< INR 10000), focus on destinations within 200-500 km of {from_loc}
+Return ONLY a valid JSON object matching this schema:
+{{
+  "recommendations": [
+    {{
+      "id": 1,
+      "name": "Destination Name",
+      "location": "District/Region, State or Country",
+      "tagline": "Captivating 1-line description",
+      "distance_from_start": "X km from {from_loc}",
+      "travel_time": "X hrs by {medium}",
+      "within_budget": true,
+      "estimated_total_cost": 4500,
+      "currency": "{currency}",
+      "cost_per_day": 1500,
+      "transport_cost": "Round-trip {medium} fare from {from_loc}",
+      "stay_cost": "Stay rate per night",
+      "food_cost": "Food rate per day",
+      "best_for": ["Hill Stations", "Nature & Landscape"],
+      "highlight": "Top 3 attractions",
+      "image_keyword": "scenic nature photo keywords",
+      "famous_for": "What makes this destination special",
+      "over_budget_note": null
+    }}
+  ],
+  "ai_summary": "Personalized 2-3 line summary for {prefs.get('name','the traveler')} explaining the recommendations, budget distribution for travel, stay, and food."
+}}"""
 
-GROUP 2 — BEYOND BUDGET / ASPIRATIONAL (mark "within_budget": false):
-  Find 2-3 destinations that:
-  • Cost 20-50% MORE than budget ({currency} {int(float(budget)*1.2)} to {currency} {int(float(budget)*1.5)})
-  • Still match the styles but may be further away or more premium
-  • Include "over_budget_note" explaining why the extra spend is worth it
-  • These can be in other states or further locations
-
-CRITICAL RULES:
-- {travel_scope}
-- All costs in {currency}, based on REAL 2025-2026 prices found via internet search
-- Show INDIVIDUAL traveler costs, NOT travel agency packages (unless travel_agency mode)
-- estimated_total_cost must reflect what a real person would ACTUALLY spend
-- Include cost_per_day as a realistic daily spending figure
-
-Return ONLY valid minified JSON (no markdown, no code blocks, no explanations):
-{{"recommendations":[{{"id":1,"name":"Destination","location":"City, State/Country","tagline":"Exciting 1-line description","distance_from_start":"{from_loc} to destination distance in km","travel_time":"X hours by {medium}","within_budget":true,"estimated_total_cost":3500,"currency":"{currency}","cost_per_day":1200,"best_for":["Hill Stations","Nature"],"highlight":"Top 3 must-see attractions","image_keyword":"scenic landscape keyword for image search","famous_for":"What makes this place unique and special","transport_cost":"Round-trip {medium} cost from {from_loc}","over_budget_note":null}},...more...],"ai_summary":"Personalized 2-3 line summary for {prefs.get('name','the traveler')} explaining the recommendations."}}"""
-
-        raw = self._call_gemini(prompt)
+        raw = self._call_gemini(prompt, use_json=True)
         if not raw:
             return None
         data = self._clean_json(raw)
         if not data or 'recommendations' not in data:
-            print(f"[AI] Could not parse Gemini response. Raw (first 500 chars): {raw[:500]}")
+            print(f"[AI] Could not parse Gemini response. Raw: {raw[:300] if raw else 'None'}")
             return None
-        # Validate each recommendation has required fields
+
         valid = []
-        for rec in data.get('recommendations', []):
+        for i, rec in enumerate(data.get('recommendations', []), start=1):
             if rec.get('name') and rec.get('estimated_total_cost') is not None:
-                rec.setdefault('within_budget', rec.get('estimated_total_cost', 0) <= float(budget))
+                rec['id'] = rec.get('id', i)
+                rec.setdefault('within_budget', float(rec.get('estimated_total_cost', 0)) <= float(budget))
                 rec.setdefault('currency', currency)
                 rec.setdefault('over_budget_note', None)
                 rec.setdefault('best_for', [])
+                rec.setdefault('is_realtime', True)
                 valid.append(rec)
         data['recommendations'] = valid
+        data['is_ai'] = True
+        data['ai_mode'] = 'Gemini AI (Real-time 2026)'
         return data
 
     # ─────────────────────────────────────────────────────────
@@ -999,46 +1096,90 @@ Return ONLY valid minified JSON (no markdown, no code blocks, no explanations):
         medium = prefs.get('travel_medium', 'any')
         food_accom = prefs.get('food_accommodation', 'with')
 
-        # Travel medium context for cost breakdown
-        if medium == 'travel_agency':
-            medium_note = "Show TRAVEL AGENCY PACKAGE costs in the cost breakdown."
-        else:
-            medium_note = f"Show INDIVIDUAL traveler costs for {medium} transport. Use real {medium} ticket prices, NOT tour package prices. Search for actual ticket costs."
+        # 1. Fetch real-time live web info (weather + Wikipedia summary)
+        live_info = fetch_live_destination_data(destination_name)
+        live_weather = live_info.get("live_weather") or "Pleasant weather"
+        wiki_context = live_info.get("wiki_summary", "")
 
-        prompt = f"""You are a comprehensive travel guide expert providing real, detailed information about "{destination_name}".
+        prompt = f"""You are a comprehensive real-time travel guide providing accurate, detailed, real-time 2026 travel data for "{destination_name}".
 
 Traveler context:
-- Coming from: {from_loc}
-- Budget: {currency} {budget} total for {num_days} days
+- Departing From: {from_loc}
+- Total Budget: {currency} {budget} total for {num_days} days
 - Group: {group_size} person(s) traveling {travel_type}
-- Travel mode: {medium}
-- {medium_note}
+- Travel Medium: {medium}
+- Food & Accommodation: {food_accom}
 
-Provide REAL, ACCURATE, SPECIFIC, and CURRENT 2025-2026 information by searching the internet. Use actual names of places, restaurants, hotels, and current ticket prices.
-For the cost_breakdown, use REALISTIC individual travel costs (actual bus/train/flight tickets, budget lodges, local food) NOT inflated tour package prices.
+REAL-TIME WEB DATA CONTEXT:
+- Current Live Weather: {live_weather}
+{f"- Web Context: {wiki_context[:250]}" if wiki_context else ""}
 
-IMPORTANT for events_festivals: Search the internet for REAL, WELL-KNOWN festivals and cultural events that actually take place at or near "{destination_name}". Include the exact months they occur, what rituals/activities happen, and why travelers should attend. These must be GENUINE festivals, NOT generic placeholders like "Local Festival" or "Cultural Event".
+Provide REAL, ACCURATE, SPECIFIC, and CURRENT 2026 data.
+Use actual names of places, authentic local food spots/restaurants, real budget & mid-range hotels/hostels with nightly rates, actual flight/train/bus travel options with fares from {from_loc}, real cultural festivals with exact months, and an itemized cost breakdown.
 
-Return ONLY valid minified JSON (no markdown):
-{{"name":"{destination_name}","full_location":"Full city, state/country","distance_from_start":"Exact distance from {from_loc}","overview":"Rich 4-sentence description of why this place is amazing and unique","famous_for":["specific thing 1","specific thing 2","specific thing 3","specific thing 4","specific thing 5"],"best_season":"Specific best months with reason e.g. Oct-Mar (cool, dry weather perfect for sightseeing)","tourist_spots":[{{"name":"Real Attraction Name","description":"What makes it special and must-visit","entry_fee":"{currency} amount or Free"}},...5 spots],"food_spots":[{{"name":"Real Restaurant or Food Street Name","specialty":"Specific local dish","avg_cost":"{currency} per person"}},...4 spots],"travel_options":[{{"mode":"Flight/Train/Bus","duration":"X hrs","cost":"{currency} approx one-way","from":"{from_loc}"}},...3 options],"accommodation":[{{"type":"Budget/Mid-range/Luxury","name":"Real hotel or hostel example","cost_per_night":"{currency} amount"}},...3 options],"events_festivals":[{{"name":"Actual Festival Name (e.g. Onam, Pushkar Camel Fair, Sunburn Festival)","month":"Specific months (e.g. August-September, November, December)","description":"2-3 sentence vivid description of what happens — rituals, performances, food, atmosphere"}},...4 to 5 REAL festivals/cultural events],"cost_breakdown":{{"travel_to_destination":"{currency} round trip from {from_loc}","accommodation_total":"{currency} for {num_days} nights","food_total":"{currency} for {num_days} days","sightseeing_total":"{currency}","miscellaneous":"{currency}","grand_total":"{currency}"}},"travel_tips":["Tip 1: specific actionable tip","Tip 2: best time to visit specific places","Tip 3: what to avoid","Tip 4: local cultural etiquette"],"local_transport":"Specific transport options with costs e.g. Auto-rickshaw: INR 20-50/km, Ola/Uber available"}}"""
+Return ONLY a valid JSON object matching this schema:
+{{
+  "name": "{destination_name}",
+  "full_location": "Full city, state/country",
+  "distance_from_start": "Exact distance in km from {from_loc}",
+  "overview": "Rich 3-4 sentence description of why this place is amazing",
+  "live_weather": "{live_weather}",
+  "famous_for": ["specific highlight 1", "specific highlight 2", "specific highlight 3", "specific highlight 4", "specific highlight 5"],
+  "best_season": "Specific best months and weather conditions",
+  "tourist_spots": [
+    {{"name": "Real Attraction Name", "description": "What makes it special", "entry_fee": "{currency} amount or Free"}}
+  ],
+  "food_spots": [
+    {{"name": "Real Restaurant or Food Joint", "specialty": "Must-try local dish", "avg_cost": "{currency} per person"}}
+  ],
+  "travel_options": [
+    {{"mode": "Flight/Train/Bus", "duration": "X hrs", "cost": "{currency} approx one-way", "from": "{from_loc}"}}
+  ],
+  "accommodation": [
+    {{"type": "Budget / Hostel", "name": "Real Hotel/Hostel Name", "cost_per_night": "{currency} amount"}},
+    {{"type": "Mid-range Hotel", "name": "Real Hotel Name", "cost_per_night": "{currency} amount"}},
+    {{"type": "Resort / Heritage", "name": "Real Resort Name", "cost_per_night": "{currency} amount"}}
+  ],
+  "events_festivals": [
+    {{"name": "Actual Festival Name", "month": "Exact Month(s)", "description": "2-3 sentence vivid description of celebrations"}}
+  ],
+  "cost_breakdown": {{
+    "travel_to_destination": "{currency} round trip from {from_loc}",
+    "accommodation_total": "{currency} for {num_days} nights",
+    "food_total": "{currency} for {num_days} days",
+    "sightseeing_total": "{currency} entry fees & permits",
+    "miscellaneous": "{currency} local transport & buffer",
+    "grand_total": "{currency} total estimated cost"
+  }},
+  "travel_tips": ["Actionable tip 1", "Actionable tip 2", "Actionable tip 3", "Actionable tip 4"],
+  "local_transport": "Specific local transport options with fares (auto, cab, bike rental)",
+  "emergency_contacts": "Tourist helpline, police (112), and medical emergency contacts"
+}}"""
 
-        raw = self._call_gemini(prompt)
+        raw = self._call_gemini(prompt, use_json=True)
         if not raw:
             return None
-        return self._clean_json(raw)
+        details = self._clean_json(raw)
+        if details and isinstance(details, dict):
+            if live_weather and not details.get('live_weather'):
+                details['live_weather'] = live_weather
+            details['is_realtime'] = True
+            details['data_source'] = "Gemini AI + Live Web Internet Data"
+            return details
+        return None
 
     # ─────────────────────────────────────────────────────────
     #  PUBLIC: LOCATION SUGGESTIONS
     # ─────────────────────────────────────────────────────────
 
     def get_location_suggestions(self, query: str) -> list:
-        """Autocomplete location suggestions."""
+        """Autocomplete location suggestions using Gemini AI with fallback."""
         self._configure()
         if self.available:
-            prompt = f"""List exactly 6 real Indian cities or popular tourist locations matching "{query}".
-Return ONLY a JSON array of strings, no other text:
-["Location 1, State", "Location 2, State", ...]"""
-            raw = self._call_gemini(prompt)
+            prompt = f"""List exactly 6 real Indian or international cities/tourist destinations matching "{query}".
+Return ONLY a valid JSON array of strings:
+["Location 1, State/Country", "Location 2, State/Country", ...]"""
+            raw = self._call_gemini(prompt, use_json=True, try_search=False)
             if raw:
                 data = self._clean_json(raw)
                 if isinstance(data, list):

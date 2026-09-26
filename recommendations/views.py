@@ -105,6 +105,8 @@ class GetRecommendationsView(APIView):
                 'ip_location': ip_location,
                 'recommendations': recs,
                 'ai_summary': result.get('ai_summary', ''),
+                'is_ai': result.get('is_ai', False),
+                'ai_mode': result.get('ai_mode', 'Gemini AI (Real-time 2026)' if result.get('is_ai') else 'Smart Fallback'),
             })
 
         except Exception as exc:
@@ -138,7 +140,12 @@ class GetDestinationDetailsView(APIView):
         try:
             ai_service = _get_ai_service()
             details = ai_service.get_destination_details(destination_name, user_prefs)
-            return Response({'success': True, 'details': details})
+            return Response({
+                'success': True,
+                'details': details,
+                'is_realtime': details.get('is_realtime', False),
+                'data_source': details.get('data_source', 'Gemini AI + Live Web Internet Data'),
+            })
         except Exception as exc:
             print(f"  Detail error: {exc}")
             traceback.print_exc()
@@ -202,8 +209,8 @@ class HealthCheckView(APIView):
                 'status': 'ok',
                 'service': 'GypsyCompass API',
                 'ai_available': ai_service.available,
-                'ai_mode': 'Gemini AI (Real-time)' if ai_service.available else 'Smart Fallback (30+ destinations)',
-                'version': '2.0.0',
+                'ai_mode': 'Gemini AI (Real-time 2026)' if ai_service.available else 'Smart Fallback (30+ destinations)',
+                'version': '2.5.0',
             })
         except Exception as exc:
             return Response({'status': 'error', 'detail': str(exc)})
